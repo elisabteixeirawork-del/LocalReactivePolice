@@ -24,4 +24,14 @@ jobs:
     - name: Compilar plugin
       working-directory: ${{ github.workspace }}
       run: |
-        msbuild LocalReactivePolice.vcxproj
+        msbuild LocalReactivePolice.vcxproj /p:Configuration=Release /p:Platform=Win32
+
+    - name: Listar outputs
+      run: |
+        Get-ChildItem -Recurse "${{ github.workspace }}\bin"
+
+    - name: Upload ASI
+      uses: actions/upload-artifact@v4
+      with:
+        name: LocalReactivePolice
+        path: ${{ github.workspace }}\bin\Release\LocalReactivePolice.asi
