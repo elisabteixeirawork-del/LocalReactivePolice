@@ -1,0 +1,33 @@
+name: Build LocalReactivePolice ASI
+
+on:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout repositório
+      uses: actions/checkout@v4
+
+    - name: Clonar plugin-sdk
+      run: |
+        git clone https://github.com/DK22Pac/plugin-sdk.git C:\plugin-sdk
+
+    - name: Definir PLUGIN_SDK_DIR
+      run: echo "PLUGIN_SDK_DIR=C:\plugin-sdk" >> $env:GITHUB_ENV
+
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+
+    - name: Compilar plugin
+      run: |
+        msbuild LocalReactivePolice.vcxproj /p:Configuration=Release /p:Platform=Win32
+
+    - name: Upload ASI
+      uses: actions/upload-artifact@v4
+      with:
+        name: LocalReactivePolice
+        path: bin\Release\LocalReactivePolice.asi
