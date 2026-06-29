@@ -16,6 +16,13 @@ jobs:
       run: |
         git clone https://github.com/DK22Pac/plugin-sdk.git C:\plugin-sdk
 
+    - name: Corrigir injector.hpp (compatibilidade MSVC moderno)
+      run: |
+        $file = "C:\plugin-sdk\injector\injector.hpp"
+        $content = Get-Content $file -Raw
+        $content = $content -replace 'typename std::enable_if<is_pointer_or_intptr<T>::value>::type\* = nullptr', 'typename = typename std::enable_if<is_pointer_or_intptr<T>::value>::type'
+        Set-Content $file $content
+
     - name: Definir PLUGIN_SDK_DIR
       run: echo "PLUGIN_SDK_DIR=C:\plugin-sdk" >> $env:GITHUB_ENV
 
@@ -25,7 +32,7 @@ jobs:
     - name: Compilar plugin
       working-directory: ${{ github.workspace }}
       run: |
-        msbuild LocalReactivePolice.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v142 /p:LanguageStandard=stdcpp14
+        msbuild LocalReactivePolice.vcxproj /p:Configuration=Release /p:Platform=Win32
 
     - name: Upload ASI
       uses: actions/upload-artifact@v4
