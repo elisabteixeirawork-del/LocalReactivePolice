@@ -6,7 +6,7 @@ on:
 
 jobs:
   build:
-    runs-on: windows-2019
+    runs-on: windows-latest
 
     steps:
     - name: Checkout repositório
@@ -25,7 +25,7 @@ jobs:
     - name: Compilar plugin
       working-directory: ${{ github.workspace }}
       run: |
-        msbuild LocalReactivePolice.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v142
+        msbuild LocalReactivePolice.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v142 /p:LanguageStandard=stdcpp14
 
     - name: Upload ASI
       uses: actions/upload-artifact@v4
