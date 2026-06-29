@@ -15,9 +15,22 @@ jobs:
     - name: Checkout repositório
       uses: actions/checkout@v4
 
-    - name: Ver ramos disponíveis no plugin-sdk
+    - name: Clonar plugin-sdk master
       run: |
-        git ls-remote --heads https://github.com/DK22Pac/plugin-sdk.git
+        git clone --branch master https://github.com/DK22Pac/plugin-sdk.git C:\plugin-sdk
+
+    - name: Patch ficheiros incompativeis com MSVC moderno
+      run: |
+        # Desativar injector.hpp
+        Set-Content "C:\plugin-sdk\injector\injector.hpp" "#pragma once`nnamespace injector {}"
+        # Desativar safetyhook.hpp
+        Set-Content "C:\plugin-sdk\safetyhook\safetyhook.hpp" "#pragma once"
+        # Desativar assembly.hpp
+        Set-Content "C:\plugin-sdk\injector\assembly.hpp" "#pragma once`nnamespace injector { namespace injector_asm {} }"
+        # Desativar hooking.hpp
+        Set-Content "C:\plugin-sdk\injector\hooking.hpp" "#pragma once`nnamespace injector {}"
+        # Desativar utility.hpp parcialmente - manter so o essencial
+        Set-Content "C:\plugin-sdk\injector\utility.hpp" "#pragma once`nnamespace injector { using memory_pointer_tr = void*; using memory_pointer_raw = void*; }"
 
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
