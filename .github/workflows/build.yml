@@ -12,17 +12,13 @@ jobs:
     - name: Checkout repositório
       uses: actions/checkout@v4
 
-    - name: Listar ficheiros do repositorio
-      run: |
-        Get-ChildItem -Recurse ${{ github.workspace }}
-
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
 
     - name: Compilar plugin
       working-directory: ${{ github.workspace }}
       run: |
-        msbuild LocalReactivePolice.vcxproj /p:Configuration=Release /p:Platform=Win32
+        msbuild LocalReactivePolice_v3.vcxproj /p:Configuration=Release /p:Platform=Win32
 
     - name: Upload ASI
       uses: actions/upload-artifact@v4
