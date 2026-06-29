@@ -12,6 +12,10 @@ jobs:
     - name: Checkout repositório
       uses: actions/checkout@v4
 
+    - name: Listar ficheiros do repositorio
+      run: |
+        Get-ChildItem -Recurse ${{ github.workspace }}
+
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
 
