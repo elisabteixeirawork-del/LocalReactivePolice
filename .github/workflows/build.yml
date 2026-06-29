@@ -24,10 +24,4 @@ jobs:
     - name: Compilar plugin
       working-directory: ${{ github.workspace }}
       run: |
-        msbuild LocalReactivePolice.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:ExceptionHandling=false
-
-    - name: Upload ASI
-      uses: actions/upload-artifact@v4
-      with:
-        name: LocalReactivePolice
-        path: ${{ github.workspace }}\bin\Release\LocalReactivePolice.asi
+        msbuild LocalReactivePolice.vcxproj
