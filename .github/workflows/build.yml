@@ -19,23 +19,10 @@ jobs:
       run: |
         git clone https://github.com/DK22Pac/plugin-sdk.git C:\plugin-sdk
 
-    - name: Patch injector.hpp
+    - name: Ver estrutura do plugin-sdk
       run: |
-        $f = "C:\plugin-sdk\injector\injector.hpp"
-        $c = Get-Content $f -Raw
-        # Substituir o template problemático por versão compatível
-        $c = $c -replace '(?s)(template\s*<[^>]*>)\s*\n(\s*)(inline\s+\w+\s+\w+\s*\([^)]*valid_pointer_type[^)]*\))', '$1`n$2// patched`n$2'
-        # Desativar include do injector nas partes problemáticas  
-        $c = $c -replace '#include\s+"injector/injector\.hpp"', '// injector disabled'
-        Set-Content $f $c
-
-    - name: Patch plugin.h para desativar injector
-      run: |
-        $f = "C:\plugin-sdk\plugin_sa\plugin.h"
-        $c = Get-Content $f -Raw
-        $c = $c -replace '#include\s+"injector/injector\.hpp"', '// injector disabled'
-        $c = $c -replace '#include\s+"injector\\\\injector\.hpp"', '// injector disabled'
-        Set-Content $f $c
+        Get-ChildItem "C:\plugin-sdk" -Recurse -Filter "plugin.h" | Select-Object FullName
+        Get-ChildItem "C:\plugin-sdk" -Recurse -Filter "injector.hpp" | Select-Object FullName
 
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
