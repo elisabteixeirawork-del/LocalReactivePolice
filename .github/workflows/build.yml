@@ -8,6 +8,9 @@ jobs:
   build:
     runs-on: windows-latest
 
+    env:
+      PLUGIN_SDK_DIR: C:\plugin-sdk
+
     steps:
     - name: Checkout repositório
       uses: actions/checkout@v4
@@ -22,11 +25,7 @@ jobs:
     - name: Compilar plugin
       working-directory: ${{ github.workspace }}
       run: |
-        msbuild LocalReactivePolice.vcxproj `
-          /p:Configuration=Release `
-          /p:Platform=Win32 `
-          /p:PLUGIN_SDK_DIR="C:\plugin-sdk" `
-          /p:AdditionalIncludeDirectories="C:\plugin-sdk\plugin_sa;C:\plugin-sdk\plugin_sa\game_sa;C:\plugin-sdk\shared;C:\plugin-sdk\shared\game"
+        msbuild LocalReactivePolice.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PLUGIN_SDK_DIR="C:\plugin-sdk"
 
     - name: Upload ASI
       uses: actions/upload-artifact@v4
