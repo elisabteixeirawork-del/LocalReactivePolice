@@ -15,19 +15,11 @@ jobs:
     - name: Checkout repositório
       uses: actions/checkout@v4
 
-    - name: Clonar plugin-sdk
+    - name: Clonar plugin-sdk versão estável antiga
       run: |
         git clone https://github.com/DK22Pac/plugin-sdk.git C:\plugin-sdk
-
-    - name: Substituir injector.hpp por versão corrigida
-      run: |
-        $content = "#pragma once`nnamespace injector {}"
-        Set-Content "C:\plugin-sdk\injector\injector.hpp" $content
-
-    - name: Substituir safetyhook.hpp por versão corrigida
-      run: |
-        $content = "#pragma once`n// safetyhook disabled for compatibility"
-        Set-Content "C:\plugin-sdk\safetyhook\safetyhook.hpp" $content
+        cd C:\plugin-sdk
+        git checkout 45a8f9b
 
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
