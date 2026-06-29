@@ -15,14 +15,12 @@ jobs:
     - name: Checkout repositório
       uses: actions/checkout@v4
 
-    - name: Instalar Visual Studio 2019 Build Tools com MSVC v142
-      uses: microsoft/setup-msbuild@v2
-
-    - name: Clonar plugin-sdk ramo estável SA
+    - name: Ver ramos disponíveis no plugin-sdk
       run: |
-        git clone --branch dev https://github.com/DK22Pac/plugin-sdk.git C:\plugin-sdk
-        cd C:\plugin-sdk
-        git log --oneline -5
+        git ls-remote --heads https://github.com/DK22Pac/plugin-sdk.git
+
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
 
     - name: Compilar plugin
       working-directory: ${{ github.workspace }}
