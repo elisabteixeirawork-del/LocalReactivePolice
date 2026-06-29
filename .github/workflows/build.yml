@@ -16,18 +16,17 @@ jobs:
       run: |
         git clone https://github.com/DK22Pac/plugin-sdk.git C:\plugin-sdk
 
-    - name: Ver linha 70 do injector.hpp
-      run: |
-        $lines = Get-Content "C:\plugin-sdk\injector\injector.hpp"
-        $lines[65..75] | ForEach-Object { $_ }
-
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
 
     - name: Compilar plugin
       working-directory: ${{ github.workspace }}
       run: |
-        msbuild LocalReactivePolice.vcxproj /p:Configuration=Release /p:Platform=Win32
+        msbuild LocalReactivePolice.vcxproj `
+          /p:Configuration=Release `
+          /p:Platform=Win32 `
+          /p:PLUGIN_SDK_DIR="C:\plugin-sdk" `
+          /p:AdditionalIncludeDirectories="C:\plugin-sdk\plugin_sa;C:\plugin-sdk\plugin_sa\game_sa;C:\plugin-sdk\shared;C:\plugin-sdk\shared\game"
 
     - name: Upload ASI
       uses: actions/upload-artifact@v4
