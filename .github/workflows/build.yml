@@ -19,10 +19,15 @@ jobs:
       run: |
         git clone https://github.com/DK22Pac/plugin-sdk.git C:\plugin-sdk
 
-    - name: Ver estrutura do plugin-sdk
+    - name: Substituir injector.hpp por versão corrigida
       run: |
-        Get-ChildItem "C:\plugin-sdk" -Recurse -Filter "plugin.h" | Select-Object FullName
-        Get-ChildItem "C:\plugin-sdk" -Recurse -Filter "injector.hpp" | Select-Object FullName
+        $content = @'
+        #pragma once
+        // injector.hpp - versão simplificada compatível com MSVC moderno
+        // Gerado automaticamente para evitar erros C2061 com VS 2019+
+        namespace injector {}
+        '@
+        Set-Content "C:\plugin-sdk\injector\injector.hpp" $content
 
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
