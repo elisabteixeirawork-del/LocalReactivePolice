@@ -16,15 +16,10 @@ jobs:
       run: |
         git clone https://github.com/DK22Pac/plugin-sdk.git C:\plugin-sdk
 
-    - name: Corrigir injector.hpp (compatibilidade MSVC moderno)
+    - name: Ver linha 70 do injector.hpp
       run: |
-        $file = "C:\plugin-sdk\injector\injector.hpp"
-        $content = Get-Content $file -Raw
-        $content = $content -replace 'typename std::enable_if<is_pointer_or_intptr<T>::value>::type\* = nullptr', 'typename = typename std::enable_if<is_pointer_or_intptr<T>::value>::type'
-        Set-Content $file $content
-
-    - name: Definir PLUGIN_SDK_DIR
-      run: echo "PLUGIN_SDK_DIR=C:\plugin-sdk" >> $env:GITHUB_ENV
+        $lines = Get-Content "C:\plugin-sdk\injector\injector.hpp"
+        $lines[65..75] | ForEach-Object { $_ }
 
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
