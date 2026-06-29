@@ -21,13 +21,13 @@ jobs:
 
     - name: Substituir injector.hpp por versão corrigida
       run: |
-        $content = @'
-        #pragma once
-        // injector.hpp - versão simplificada compatível com MSVC moderno
-        // Gerado automaticamente para evitar erros C2061 com VS 2019+
-        namespace injector {}
-        '@
+        $content = "#pragma once`nnamespace injector {}"
         Set-Content "C:\plugin-sdk\injector\injector.hpp" $content
+
+    - name: Substituir safetyhook.hpp por versão corrigida
+      run: |
+        $content = "#pragma once`n// safetyhook disabled for compatibility"
+        Set-Content "C:\plugin-sdk\safetyhook\safetyhook.hpp" $content
 
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
