@@ -1,7 +1,15 @@
 /*
- * LocalReactivePolice.cpp - v5
+ * LocalReactivePolice.cpp - v6
  * Plugin GTA San Andreas - Policia Reativa Local
- * Modificacoes v5: detecao de combate mais robusta
+ *
+ * v6: Sistema de detecao baseado em eventos reais do GTA SA
+ * em vez de TASK IDs incertas.
+ *
+ * Abordagem:
+ *   1. Saude a diminuir entre frames (ped a sofrer dano activo)
+ *   2. Arma equipada + flag de disparo activo
+ *   3. CEventHandler com eventos hostis activos
+ *   4. TASK IDs como ultimo recurso (lista alargada)
  */
 
 #define WIN32_LEAN_AND_MEAN
@@ -15,37 +23,65 @@
 //  ENDERECOS DE MEMORIA DO GTA SA 1.0 US
 // ─────────────────────────────────────────────
 
-#define PED_POOL_PTR                            0xB74490
-#define PLAYER_PED_PTR                          0xB6F5F0
-#define PED_HEALTH_OFFSET                       0x540
-#define PED_TYPE_OFFSET                         0x528
-#define PED_FLAGS_OFFSET                        0x46C
-#define PED_TASK_MGR_OFFSET                     0x4A8
-#define PED_TARGET_OFFSET                       0x564  // m_pTargetedObject
-#define PED_EVENT_HANDLER_OFFSET                0x578  // CEventHandler
-#define PED_WEAPON_SLOT_OFFSET                  0x5A0  // weapon slot actual
-#define PED_WEAPON_TYPE_OFFSET                  0x5A4  // tipo da arma actual
-#define PED_INAIR_FLAG                          (1 << 8)
-#define PED_INWATER_FLAG                        (1 << 9)
-#define PED_TYPE_COP                            6
-#define ENTITY_TYPE_PED                         4
+#define PED_POOL_PTR                0xB74490
+#define PLAYER_PED_PTR              0xB6F5F0
 
-// Task types - principal slot
-#define TASK_PRIMARY_PRIMARY                    2
-#define TASK_PRIMARY_PHYSICAL_RESPONSE          3
+// Offsets dentro de CPed
+#define PED_HEALTH_OFFSET           0x540   // float
+#define PED_TYPE_OFFSET             0x528   // BYTE
+#define PED_FLAGS_OFFSET            0x46C   // DWORD
+#define PED_TASK_MGR_OFFSET         0x4A8   // CTaskManager (inline, 5 slots * 4 bytes)
+#define PED_TARGET_OFFSET           0x564   // CEntity* m_pTargetedObject
+#define PED_IN_VEHICLE_FLAG         (1 << 8)
+#define ENTITY_TYPE_PED             4
+#define PED_TYPE_COP                6
 
-// Tasks de combate conhecidas no GTA SA
+// Offsets de arma (dentro de CPed)
+// CWeaponSlot array começa em 0x5A0, cada slot tem 0x1C bytes
+// slot actual em 0x718 (m_nActiveWeaponSlot = BYTE)
+#define PED_ACTIVE_WEAPON_SLOT      0x718   // BYTE: indice do slot activo (0=fists)
+#define PED_WEAPON_ARRAY_OFFSET     0x5A0   // array de CWeapon (cada um tem 0x1C bytes)
+#define WEAPON_TYPE_OFFSET          0x00    // DWORD dentro de CWeapon: eWeaponType
+
+// Offsets de animacao / estado
+// RpAnimBlend em CPed: offset 0x4C8 - nao usar, demasiado fragil
+// Usar flags de estado do ped
+#define PED_FIGHTFLAGS_OFFSET       0x46C   // flags gerais (bit 16 = bInFight?)
+
+// CEventHandler: lista de eventos activos do ped
+// CPed::m_pEventHandler = offset 0x578 (ponteiro para CEventHandler)
+#define PED_EVENT_HANDLER_OFFSET    0x578   // CEventHandler*
+
+// Dentro de CEventHandler:
+// offset 0x04 = array de CEvent* (lista de eventos activos)
+// offset 0x08 = numero de eventos activos
+#define EVENTHANDLER_EVENTS_OFFSET  0x04
+#define EVENTHANDLER_COUNT_OFFSET   0x08
+
+// Tipos de eventos relevantes (eEventType no GTA SA)
+// Estes valores sao da analise da comunidade SA-MP/modding
+#define EVENT_GUN_SHOT              8    // alguem disparou perto
+#define EVENT_PED_DEAD              53   // ped morreu perto
+#define EVENT_POTENTIAL_GET_RUN_OVER 13  // atropelamento
+#define EVENT_SEEN_PANICPED         46   // ped em panico visto
+#define EVENT_DAMAGE               16   // dano sofrido
+#define EVENT_INJURED              17   // ferido
+#define EVENT_KNOCKED_OFF_BIKE     36   // derrubado de mota
+#define EVENT_FIRE                 10   // incendio
+
+// Tasks (ultimo recurso)
 #define TASK_COMPLEX_KILL_PED_ON_FOOT           167
 #define TASK_COMPLEX_KILL_PED_ON_FOOT_STEALTH   168
 #define TASK_COMPLEX_FIGHT                      134
 #define TASK_SIMPLE_FIGHT                       140
 #define TASK_SIMPLE_GUN_CTRL                    160
-#define TASK_COMPLEX_GUN_FIGHT                  162  // combate com arma de fogo
-#define TASK_COMPLEX_FLEE_PED                   147  // fuga (indica que esta a ser atacado)
-#define TASK_SIMPLE_SHOOT_AT_PED                159  // disparar directamente
-#define TASK_COMPLEX_ATTACK_PED                 130  // atacar ped
-#define TASK_SIMPLE_PUNCH                       138  // soco
-#define TASK_SIMPLE_BE_HIT                      136  // a ser atingido (indica combate activo)
+#define TASK_COMPLEX_GUN_FIGHT                  162
+#define TASK_SIMPLE_SHOOT_AT_PED                159
+#define TASK_COMPLEX_ATTACK_PED                 130
+#define TASK_SIMPLE_PUNCH                       138
+#define TASK_SIMPLE_BE_HIT                      136
+#define TASK_COMPLEX_FLEE_PED_ON_FOOT           147
+#define TASK_SIMPLE_FIRE_GUN                    155  // disparar com arma
 
 // ─────────────────────────────────────────────
 //  CONFIGURACOES
@@ -53,7 +89,7 @@
 
 static constexpr float DETECTION_RADIUS     = 70.0f;
 static constexpr float POLICE_ENGAGE_RADIUS = 85.0f;
-static constexpr int   CHECK_INTERVAL_MS    = 500;
+static constexpr int   CHECK_INTERVAL_MS    = 400;  // ligeiramente mais rapido
 static constexpr bool  ENABLE_LOG           = true;
 static const char*     LOG_FILE             = "LocalReactivePolice.log";
 
@@ -85,6 +121,14 @@ static inline T ReadMem(DWORD addr)
 struct Vec3 { float x, y, z; };
 
 // ─────────────────────────────────────────────
+//  HISTORICO DE SAUDE (para detectar dano activo)
+// ─────────────────────────────────────────────
+
+// Guarda a saude anterior de cada ped no pool (max 140 peds)
+static float g_prevHealth[140] = {};
+static bool  g_healthInitialized = false;
+
+// ─────────────────────────────────────────────
 //  POOL DE PEDS
 // ─────────────────────────────────────────────
 
@@ -113,7 +157,7 @@ static DWORD GetPlayerPed()
 }
 
 // ─────────────────────────────────────────────
-//  UTILIDADES DE PEDS
+//  UTILIDADES
 // ─────────────────────────────────────────────
 
 static Vec3 GetPedPos(DWORD ped)
@@ -145,7 +189,7 @@ static float Dist2DToXY(DWORD ped, float px, float py)
 static bool IsPedValid(DWORD ped)
 {
     if (!ped) return false;
-    if (IsBadReadPtr((void*)ped, 0x600)) return false;
+    if (IsBadReadPtr((void*)ped, 0x750)) return false;
     float hp = ReadMem<float>(ped + PED_HEALTH_OFFSET);
     if (hp <= 0.f) return false;
     return true;
@@ -159,16 +203,119 @@ static bool IsCopPed(DWORD ped)
 }
 
 // ─────────────────────────────────────────────
-//  DETECAO DE COMBATE - VERSAO ROBUSTA v5
+//  METODO 1: SAUDE A DIMINUIR ENTRE FRAMES
+//  O ped perdeu HP desde a ultima verificacao?
+//  Isso indica que esta a ser atacado activamente.
 // ─────────────────────────────────────────────
 
-/*
- * Obtem o tipo de task num slot especifico do CTaskManager.
- * CTaskManager tem 5 slots de tasks primarias (indices 0-4).
- * Cada slot e um ponteiro para CTask.
- * O tipo da task esta em offset 0x4 dentro de CTask.
- */
-static int GetTaskType(DWORD ped, int slot)
+static bool IsPedLosingHealth(DWORD ped, int index)
+{
+    if (!ped || index < 0 || index >= 140) return false;
+    if (IsBadReadPtr((void*)(ped + PED_HEALTH_OFFSET), 4)) return false;
+
+    float currentHP = ReadMem<float>(ped + PED_HEALTH_OFFSET);
+
+    if (!g_healthInitialized)
+    {
+        g_prevHealth[index] = currentHP;
+        return false;
+    }
+
+    float prevHP = g_prevHealth[index];
+    g_prevHealth[index] = currentHP;
+
+    // Perdeu mais de 1 ponto de HP desde a ultima frame de verificacao
+    if (prevHP > 0.f && currentHP > 0.f && (prevHP - currentHP) > 1.0f)
+    {
+        Log("Ped a perder saude: " + std::to_string((int)prevHP) +
+            " -> " + std::to_string((int)currentHP));
+        return true;
+    }
+    return false;
+}
+
+// ─────────────────────────────────────────────
+//  METODO 2: ARMA EQUIPADA
+//  Ped tem arma na mao que nao seja os punhos?
+//  Tipo de arma > 0 e slot activo > 0.
+// ─────────────────────────────────────────────
+
+static bool IsPedArmed(DWORD ped)
+{
+    if (!ped) return false;
+    if (IsBadReadPtr((void*)(ped + PED_ACTIVE_WEAPON_SLOT), 1)) return false;
+
+    BYTE activeSlot = ReadMem<BYTE>(ped + PED_ACTIVE_WEAPON_SLOT);
+
+    // Slot 0 = punhos, ignorar
+    if (activeSlot == 0) return false;
+    if (activeSlot > 12) return false;
+
+    // Ler tipo da arma no slot activo
+    DWORD weaponAddr = ped + PED_WEAPON_ARRAY_OFFSET + (activeSlot * 0x1C);
+    if (IsBadReadPtr((void*)weaponAddr, 4)) return false;
+
+    DWORD weaponType = ReadMem<DWORD>(weaponAddr + WEAPON_TYPE_OFFSET);
+
+    // Tipos de arma > 1 sao armas reais (facas, pistolas, etc.)
+    if (weaponType > 1)
+    {
+        Log("Ped armado: arma tipo " + std::to_string(weaponType) +
+            " no slot " + std::to_string(activeSlot));
+        return true;
+    }
+    return false;
+}
+
+// ─────────────────────────────────────────────
+//  METODO 3: EVENTOS ACTIVOS NO CEventHandler
+//  Verificar se o ped tem eventos hostis activos
+//  (disparos, dano, panico, etc.)
+// ─────────────────────────────────────────────
+
+static bool IsPedHavingCombatEvent(DWORD ped)
+{
+    if (!ped) return false;
+    if (IsBadReadPtr((void*)(ped + PED_EVENT_HANDLER_OFFSET), 4)) return false;
+
+    DWORD eventHandler = ReadMem<DWORD>(ped + PED_EVENT_HANDLER_OFFSET);
+    if (!eventHandler) return false;
+    if (IsBadReadPtr((void*)eventHandler, 16)) return false;
+
+    int eventCount = ReadMem<int>(eventHandler + EVENTHANDLER_COUNT_OFFSET);
+    if (eventCount <= 0 || eventCount > 32) return false;
+
+    DWORD eventsArray = ReadMem<DWORD>(eventHandler + EVENTHANDLER_EVENTS_OFFSET);
+    if (!eventsArray) return false;
+    if (IsBadReadPtr((void*)eventsArray, eventCount * 4)) return false;
+
+    for (int i = 0; i < eventCount; i++)
+    {
+        DWORD eventPtr = ReadMem<DWORD>(eventsArray + i * 4);
+        if (!eventPtr) continue;
+        if (IsBadReadPtr((void*)eventPtr, 8)) continue;
+
+        // Tipo do evento: offset 0x04 dentro de CEvent
+        int eventType = ReadMem<int>(eventPtr + 0x04);
+
+        if (eventType == EVENT_GUN_SHOT    ||
+            eventType == EVENT_DAMAGE      ||
+            eventType == EVENT_INJURED     ||
+            eventType == EVENT_PED_DEAD    ||
+            eventType == EVENT_FIRE)
+        {
+            Log("Evento hostil encontrado: tipo " + std::to_string(eventType));
+            return true;
+        }
+    }
+    return false;
+}
+
+// ─────────────────────────────────────────────
+//  METODO 4: TASK IDs (lista completa, backup)
+// ─────────────────────────────────────────────
+
+static int GetTaskTypeAtSlot(DWORD ped, int slot)
 {
     if (!ped) return -1;
     DWORD taskMgr = ped + PED_TASK_MGR_OFFSET;
@@ -179,19 +326,8 @@ static int GetTaskType(DWORD ped, int slot)
     return ReadMem<int>(task + 0x4);
 }
 
-/*
- * IsPedFighting v5 - detecao muito mais abrangente:
- * 1. Verifica multiplos slots de task (PRIMARY e PHYSICAL_RESPONSE)
- * 2. Inclui tasks de fuga (indica que esta a ser atacado)
- * 3. Verifica se o ped tem arma equipada E tem um alvo
- * 4. Verifica flag de "em combate" no CEventHandler
- */
-static bool IsPedFighting(DWORD ped)
+static bool IsPedFightingByTask(DWORD ped)
 {
-    if (!ped) return false;
-    if (IsBadReadPtr((void*)ped, 0x600)) return false;
-
-    // Lista alargada de tasks de combate
     static const int combatTasks[] = {
         TASK_COMPLEX_KILL_PED_ON_FOOT,
         TASK_COMPLEX_KILL_PED_ON_FOOT_STEALTH,
@@ -203,15 +339,15 @@ static bool IsPedFighting(DWORD ped)
         TASK_COMPLEX_ATTACK_PED,
         TASK_SIMPLE_PUNCH,
         TASK_SIMPLE_BE_HIT,
+        TASK_COMPLEX_FLEE_PED_ON_FOOT,
+        TASK_SIMPLE_FIRE_GUN,
         -1
     };
 
-    // Verificar slots 0, 1, 2, 3 do task manager
-    for (int slot = 0; slot <= 3; slot++)
+    for (int slot = 0; slot <= 4; slot++)
     {
-        int type = GetTaskType(ped, slot);
+        int type = GetTaskTypeAtSlot(ped, slot);
         if (type < 0) continue;
-
         for (int i = 0; combatTasks[i] != -1; i++)
         {
             if (type == combatTasks[i])
@@ -221,61 +357,70 @@ static bool IsPedFighting(DWORD ped)
             }
         }
     }
+    return false;
+}
 
-    // Metodo alternativo: verificar se tem alvo e arma equipada
-    // weapon slot actual != 0 significa que tem arma na mao
-    if (!IsBadReadPtr((void*)(ped + PED_WEAPON_SLOT_OFFSET), 4))
+// ─────────────────────────────────────────────
+//  DETECAO COMBINADA - usa todos os metodos
+// ─────────────────────────────────────────────
+
+static bool IsPedAggressor(DWORD ped, int poolIndex)
+{
+    // Metodo 1: perdeu saude recentemente (mais fiavel)
+    if (IsPedLosingHealth(ped, poolIndex))
     {
-        DWORD weaponSlot = ReadMem<DWORD>(ped + PED_WEAPON_SLOT_OFFSET);
-        if (weaponSlot > 0 && weaponSlot <= 12)
-        {
-            // Tem arma equipada - verificar se tem alvo valido
-            if (!IsBadReadPtr((void*)(ped + PED_TARGET_OFFSET), 4))
-            {
-                DWORD target = ReadMem<DWORD>(ped + PED_TARGET_OFFSET);
-                if (target && !IsBadReadPtr((void*)target, 4))
-                {
-                    Log("Arma equipada com alvo detectado (slot " + std::to_string(weaponSlot) + ")");
-                    return true;
-                }
-            }
-        }
+        Log("Agressor por perda de saude");
+        return true;
+    }
+
+    // Metodo 2: tem arma na mao
+    if (IsPedArmed(ped))
+    {
+        Log("Ped armado detectado");
+        return true;
+    }
+
+    // Metodo 3: tem eventos de combate activos
+    if (IsPedHavingCombatEvent(ped))
+    {
+        Log("Evento de combate activo");
+        return true;
+    }
+
+    // Metodo 4: task de combate (backup)
+    if (IsPedFightingByTask(ped))
+    {
+        Log("Task de combate detectada");
+        return true;
     }
 
     return false;
 }
 
-/*
- * GetPedTarget v5 - mais robusta:
- * 1. Tenta offset primario (0x564)
- * 2. Tenta offset alternativo (0x55C) usado nalgumas versoes
- * 3. Verifica se o entity e realmente um ped
- */
+// ─────────────────────────────────────────────
+//  OBTENCAO DO ALVO
+// ─────────────────────────────────────────────
+
 static DWORD GetPedTarget(DWORD ped)
 {
     if (!ped) return 0;
 
-    // Tentar offsets conhecidos para m_pTargetedObject
-    static const DWORD targetOffsets[] = { 0x564, 0x55C, 0x568, 0 };
+    static const DWORD offsets[] = { 0x564, 0x55C, 0x568, 0 };
 
-    for (int i = 0; targetOffsets[i] != 0; i++)
+    for (int i = 0; offsets[i] != 0; i++)
     {
-        DWORD offset = targetOffsets[i];
-        if (IsBadReadPtr((void*)(ped + offset), 4)) continue;
-
-        DWORD target = ReadMem<DWORD>(ped + offset);
+        if (IsBadReadPtr((void*)(ped + offsets[i]), 4)) continue;
+        DWORD target = ReadMem<DWORD>(ped + offsets[i]);
         if (!target) continue;
         if (IsBadReadPtr((void*)target, 0x40)) continue;
-
-        // Verificar entity type: offset 0x36 = m_nType
         BYTE nType = ReadMem<BYTE>(target + 0x36);
         if (nType == ENTITY_TYPE_PED)
         {
-            Log("Alvo encontrado via offset 0x" + std::to_string(offset));
+            Log("Alvo encontrado via offset 0x" +
+                std::to_string(offsets[i]));
             return target;
         }
     }
-
     return 0;
 }
 
@@ -296,18 +441,16 @@ static void ForceCopAttack(DWORD cop, DWORD target)
     DWORD taskMgr = cop + PED_TASK_MGR_OFFSET;
     if (IsBadReadPtr((void*)taskMgr, 20)) return;
 
-    DWORD cur = ReadMem<DWORD>(taskMgr + TASK_PRIMARY_PRIMARY * 4);
+    DWORD cur = ReadMem<DWORD>(taskMgr + 2 * 4);
     if (cur && !IsBadReadPtr((void*)cur, 8))
-    {
         if (ReadMem<int>(cur + 0x4) == TASK_COMPLEX_KILL_PED_ON_FOOT)
             return;
-    }
 
     void* task = HeapAlloc(GetProcessHeap(), 0, 0x28);
     if (!task) return;
 
     KillTaskCtor(task, (DWORD*)target, -1, 0, true, true, 100.f);
-    SetTask((void*)taskMgr, task, TASK_PRIMARY_PRIMARY);
+    SetTask((void*)taskMgr, task, 2);
     Log("Policia engajou alvo");
 }
 
@@ -318,7 +461,7 @@ static void ForceCopAttack(DWORD cop, DWORD target)
 static void ProcessLocalViolence()
 {
     DWORD player = GetPlayerPed();
-    if (!player || IsBadReadPtr((void*)player, 0x600)) return;
+    if (!player || IsBadReadPtr((void*)player, 0x750)) return;
 
     Vec3 pp = GetPedPos(player);
     int poolSize = GetPedPoolSize();
@@ -343,22 +486,26 @@ static void ProcessLocalViolence()
             continue;
         }
 
-        if (dist <= DETECTION_RADIUS && IsPedFighting(ped))
+        if (dist <= DETECTION_RADIUS)
         {
-            DWORD target = GetPedTarget(ped);
-            if (target && target != player && !IsCopPed(target))
+            if (IsPedAggressor(ped, i))
             {
-                Log("Agressor registado (dist: " + std::to_string((int)dist) + "m)");
-                aggressors[aggCount++] = ped;
-            }
-            else if (!target)
-            {
-                // Sem alvo confirmado mas esta em combate - registar mesmo assim
-                Log("Agressor sem alvo confirmado registado");
-                aggressors[aggCount++] = ped;
+                // Verificar se nao e o CJ a ser o "agressor" detectado
+                DWORD target = GetPedTarget(ped);
+                bool targetIsPlayer = (target == player);
+
+                if (!targetIsPlayer)
+                {
+                    Log("Agressor registado (dist: " +
+                        std::to_string((int)dist) + "m)");
+                    aggressors[aggCount++] = ped;
+                }
             }
         }
     }
+
+    // Actualizar flag de inicializacao do historico de saude
+    g_healthInitialized = true;
 
     if (aggCount == 0 || copCount == 0) return;
 
@@ -388,7 +535,7 @@ static bool   g_bRunning = false;
 static DWORD WINAPI PluginThread(LPVOID)
 {
     Sleep(5000);
-    Log("=== LocalReactivePolice v5 iniciado ===");
+    Log("=== LocalReactivePolice v6 iniciado ===");
     while (g_bRunning)
     {
         ProcessLocalViolence();
@@ -408,7 +555,11 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID)
     else if (reason == DLL_PROCESS_DETACH)
     {
         g_bRunning = false;
-        if (g_hThread) { WaitForSingleObject(g_hThread, 1000); CloseHandle(g_hThread); }
+        if (g_hThread)
+        {
+            WaitForSingleObject(g_hThread, 1000);
+            CloseHandle(g_hThread);
+        }
     }
     return TRUE;
 }
