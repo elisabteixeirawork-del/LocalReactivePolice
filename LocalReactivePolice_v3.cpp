@@ -1,24 +1,17 @@
 /*
- * LocalReactivePolice.cpp - v7
+ * LocalReactivePolice.cpp - v8
  * Plugin GTA San Andreas - Policia Reativa Local
  *
- * Arquitectura baseada no Police Assistance (CLEO) - provado funcionar.
- * Generalizado: observa qualquer ped, nao apenas o CJ.
+ * Correcoes v8 (baseadas em GTAMods Wiki documentado):
+ *   1. GetPedPos(): corrigido para double dereference
+ *      *(ped + 0x14) + 0x30 em vez de ped + 0x44 directo
+ *   2. ENTITY_TYPE_PED: corrigido de 4 para 3
+ *   3. GetPedTarget(): usa 0x79C (Targetted CPed, documentado)
+ *      em vez dos offsets incertos anteriores
  *
- * Filosofia:
- *   1. Para cada ped proximo do jogador:
- *      - ler offset 0x764 (m_pDamager: ultimo ped que causou dano)
- *      - se existir um atacante valido e nao-policia -> agressor confirmado
- *   2. Encontrar policia proximo
- *   3. Ordenar ataque via AS_actor kill_actor (opcode 05E2 nativo)
- *   4. Aguardar fim do combate
- *   5. Devolver cop ao comportamento normal
- *
- * Componentes reutilizados da v6.1:
- *   - DllMain, thread, logging
- *   - Pool de peds, validacoes, distancias
- *   - Cooldown por cop
- *   - IsPedLosingHealth (backup adicional)
+ * Arquitectura: baseada no Police Assistance (CLEO)
+ *   - offset 0x764 = ultimo ped que causou dano (documentado, valido para qualquer CPed)
+ *   - generalizado para qualquer ped, nao apenas CJ
  */
 
 #define WIN32_LEAN_AND_MEAN
@@ -30,51 +23,48 @@
 
 // ─────────────────────────────────────────────
 //  ENDERECOS DE MEMORIA DO GTA SA 1.0 US
+//  Fonte: GTAMods Wiki - Memory Addresses (SA)
+//  https://gtamods.com/wiki/Memory_Addresses_(SA)
 // ─────────────────────────────────────────────
 
-#define PED_POOL_PTR            0xB74490   // CPools::ms_pPedPool
-#define PLAYER_PED_PTR          0xB6F5F0   // FindPlayerPed cache
+#define PED_POOL_PTR            0xB74490   // Pointer to ped pool usage information
+#define PLAYER_PED_PTR          0xB6F5F0   // Player pointer (CPed)
 
-// Offsets dentro de CPed
-#define PED_POS_X               0x44       // CEntity::GetPosition().x
-#define PED_POS_Y               0x48
-#define PED_POS_Z               0x4C
-#define PED_HEALTH_OFFSET       0x540      // float m_fHealth
-#define PED_TYPE_OFFSET         0x528      // BYTE m_nPedType
-#define PED_FLAGS_OFFSET        0x46C      // DWORD flags
-#define PED_IN_VEHICLE_FLAG     (1 << 8)
+// CPed offsets (documentados GTAMods Wiki)
+#define PED_MATRIX_PTR          0x14       // Pointer to XYZ position structure
+#define PED_MATRIX_POS          0x30       // [CVector] Position dentro da matrix
+// GetPedPos(): pos = *(ped + 0x14) + 0x30  (double dereference)
+
+#define PED_HEALTH_OFFSET       0x540      // [float] Health
+#define PED_TYPE_OFFSET         0x528      // [byte] PedType
+#define PED_FLAGS_OFFSET        0x46C      // [byte] flags (0=air/water, 1=car, 3=foot)
+#define PED_IN_VEHICLE_VAL      1          // valor para "in car" em 0x46C
+
+#define PED_DAMAGER_OFFSET      0x764      // [dword] Pointer to the ped that damaged you
+#define PED_TARGET_OFFSET       0x79C      // [dword] Targetted CPed
+#define PED_WEAPON_DMG          0x760      // [dword] Weapon you were damaged with
+
+// eEntityType (documentado GTAMods Wiki)
+#define ENTITY_TYPE_PED         3          // ENTITY_TYPE_PED = 3 (nao 4!)
+#define ENTITY_TYPE_OFFSET      0x36       // [byte] dentro de CEntity
+
+// ePedType
 #define PED_TYPE_COP            6
 
-// Offset critico: m_pDamager
-// Descoberto pela analise do Police Assistance CLEO:
-//   get_ped_pointer + 1892 (decimal) = 0x764
-// Este offset aponta para o ultimo CPed que causou dano a este ped.
-// E o metodo mais fiavel para detectar agressao activa.
-#define PED_DAMAGER_OFFSET      0x764      // CPed* m_pLastDamager
-
-// Entity type
-#define ENTITY_TYPE_PED         4
-#define ENTITY_TYPE_OFFSET      0x36       // BYTE dentro de CEntity
-
-// Enderecos de funcoes nativas do GTA SA 1.0 US
-// CTaskComplexKillPedOnFoot::ctor
-#define ADDR_KILL_TASK_CTOR     0x624670
-// CTaskManager::SetTask
-#define ADDR_SET_TASK           0x681AD0
-// CPed::ClearTasks (equivalente a clear_actor task)
-#define ADDR_CLEAR_TASKS        0x61A0A0
-// CPed::RestorePreviousObjective (equivalente a walk_around_ped_path)
-#define ADDR_RESTORE_PATROL     0x601640
+// Task slots e tipos
+#define TASK_MGR_OFFSET         0x4A8      // CTaskManager inline
+#define TASK_SLOT_PRIMARY       2          // slot principal
+#define TASK_COMPLEX_KILL_PED   167        // CTaskComplexKillPedOnFoot
 
 // ─────────────────────────────────────────────
 //  CONFIGURACOES
 // ─────────────────────────────────────────────
 
-static constexpr float DETECTION_RADIUS     = 70.0f;   // raio de observacao
-static constexpr float POLICE_ENGAGE_RADIUS = 85.0f;   // raio de busca de policia
-static constexpr int   CHECK_INTERVAL_MS    = 500;     // intervalo de verificacao
-static constexpr int   COP_COOLDOWN_MS      = 12000;   // cooldown por cop (12s)
-static constexpr float HP_LOSS_THRESHOLD    = 1.0f;    // perda minima de HP
+static constexpr float DETECTION_RADIUS     = 70.0f;
+static constexpr float POLICE_ENGAGE_RADIUS = 85.0f;
+static constexpr int   CHECK_INTERVAL_MS    = 500;
+static constexpr int   COP_COOLDOWN_MS      = 12000;
+static constexpr float HP_LOSS_THRESHOLD    = 1.0f;
 static constexpr bool  ENABLE_LOG           = true;
 static const char*     LOG_FILE             = "LocalReactivePolice.log";
 
@@ -106,7 +96,7 @@ static inline T ReadMem(DWORD addr)
 struct Vec3 { float x, y, z; };
 
 // ─────────────────────────────────────────────
-//  HISTORICO DE SAUDE (backup de deteccao)
+//  HISTORICO DE SAUDE
 // ─────────────────────────────────────────────
 
 static float g_prevHealth[140] = {};
@@ -136,15 +126,15 @@ static void SetCopCooldown(DWORD cop)
     {
         if (g_copAddr[i] == cop) { g_copLastTask[i] = now; return; }
     }
-    int oldest = 0;
-    DWORD oldestTime = g_copLastTask[0];
+    int slot = 0;
+    DWORD oldest = g_copLastTask[0];
     for (int i = 1; i < MAX_COPS_TRACKED; i++)
     {
-        if (g_copAddr[i] == 0) { oldest = i; break; }
-        if (g_copLastTask[i] < oldestTime) { oldest = i; oldestTime = g_copLastTask[i]; }
+        if (g_copAddr[i] == 0) { slot = i; break; }
+        if (g_copLastTask[i] < oldest) { oldest = g_copLastTask[i]; slot = i; }
     }
-    g_copAddr[oldest]     = cop;
-    g_copLastTask[oldest] = now;
+    g_copAddr[slot]     = cop;
+    g_copLastTask[slot] = now;
 }
 
 // ─────────────────────────────────────────────
@@ -176,16 +166,31 @@ static DWORD GetPlayerPed()
 }
 
 // ─────────────────────────────────────────────
-//  UTILIDADES
+//  POSICAO DO PED - CORRIGIDA v8
+//
+//  GTAMods Wiki: CPed +0x14 = Pointer to XYZ position structure
+//                (CPed+0x14) +0x30 = [CVector] Position
+//
+//  E um double dereference:
+//    1. Ler o ponteiro em (ped + 0x14)
+//    2. Ler a posicao em (ponteiro + 0x30)
 // ─────────────────────────────────────────────
 
 static Vec3 GetPedPos(DWORD ped)
 {
     Vec3 v = {0,0,0};
-    if (!ped || IsBadReadPtr((void*)(ped + PED_POS_X), 12)) return v;
-    v.x = ReadMem<float>(ped + PED_POS_X);
-    v.y = ReadMem<float>(ped + PED_POS_Y);
-    v.z = ReadMem<float>(ped + PED_POS_Z);
+    if (!ped) return v;
+    if (IsBadReadPtr((void*)(ped + PED_MATRIX_PTR), 4)) return v;
+
+    // Passo 1: ler o ponteiro para a estrutura de posicao
+    DWORD matrixPtr = ReadMem<DWORD>(ped + PED_MATRIX_PTR);
+    if (!matrixPtr) return v;
+    if (IsBadReadPtr((void*)(matrixPtr + PED_MATRIX_POS), 12)) return v;
+
+    // Passo 2: ler a posicao dentro da estrutura
+    v.x = ReadMem<float>(matrixPtr + PED_MATRIX_POS + 0);
+    v.y = ReadMem<float>(matrixPtr + PED_MATRIX_POS + 4);
+    v.z = ReadMem<float>(matrixPtr + PED_MATRIX_POS + 8);
     return v;
 }
 
@@ -203,46 +208,65 @@ static float Dist2DToXY(DWORD ped, float px, float py)
     return std::sqrt(dx*dx + dy*dy);
 }
 
+// ─────────────────────────────────────────────
+//  VALIDACOES DE PED
+// ─────────────────────────────────────────────
+
 static bool IsPedValid(DWORD ped)
 {
-    if (!ped || IsBadReadPtr((void*)ped, 0x600)) return false;
+    if (!ped) return false;
+    if (IsBadReadPtr((void*)ped, 0x600)) return false;
     return ReadMem<float>(ped + PED_HEALTH_OFFSET) > 0.f;
 }
 
 static bool IsCopPed(DWORD ped)
 {
-    if (!ped || IsBadReadPtr((void*)(ped + PED_TYPE_OFFSET), 1)) return false;
+    if (!ped) return false;
+    if (IsBadReadPtr((void*)(ped + PED_TYPE_OFFSET), 1)) return false;
     return ReadMem<BYTE>(ped + PED_TYPE_OFFSET) == PED_TYPE_COP;
 }
 
 static bool IsInVehicle(DWORD ped)
 {
-    if (!ped || IsBadReadPtr((void*)(ped + PED_FLAGS_OFFSET), 4)) return true;
-    return (ReadMem<DWORD>(ped + PED_FLAGS_OFFSET) & PED_IN_VEHICLE_FLAG) != 0;
+    if (!ped) return true;
+    if (IsBadReadPtr((void*)(ped + PED_FLAGS_OFFSET), 1)) return true;
+    // GTAMods: 0x46C: 1 = in car, 3 = on foot
+    return ReadMem<BYTE>(ped + PED_FLAGS_OFFSET) == PED_IN_VEHICLE_VAL;
 }
+
+// ─────────────────────────────────────────────
+//  VERIFICAR SE ENTITY E PED - CORRIGIDA v8
+//  ENTITY_TYPE_PED = 3 (nao 4)
+// ─────────────────────────────────────────────
+
+static bool IsEntityAPed(DWORD entity)
+{
+    if (!entity) return false;
+    if (IsBadReadPtr((void*)(entity + ENTITY_TYPE_OFFSET), 1)) return false;
+    return ReadMem<BYTE>(entity + ENTITY_TYPE_OFFSET) == ENTITY_TYPE_PED;
+}
+
+// ─────────────────────────────────────────────
+//  SAUDE A DIMINUIR (backup)
+// ─────────────────────────────────────────────
 
 static bool IsPedLosingHealth(DWORD ped, int index)
 {
     if (!ped || index < 0 || index >= 140) return false;
     if (IsBadReadPtr((void*)(ped + PED_HEALTH_OFFSET), 4)) return false;
+
     float cur = ReadMem<float>(ped + PED_HEALTH_OFFSET);
     if (!g_healthInit) { g_prevHealth[index] = cur; return false; }
+
     float prev = g_prevHealth[index];
     g_prevHealth[index] = cur;
     return (prev > 0.f && cur > 0.f && (prev - cur) > HP_LOSS_THRESHOLD);
 }
 
 // ─────────────────────────────────────────────
-//  DETECAO DE AGRESSOR - METODO DO POLICE ASSISTANCE
-//
-//  Ler PED_DAMAGER_OFFSET (0x764) dentro do ped vitima.
-//  Este campo e actualizado pelo proprio motor do GTA SA
-//  sempre que o ped sofre dano de outro ped.
-//  E exactamente o mesmo metodo que o Police Assistance
-//  usa para identificar quem atacou o CJ.
-//
-//  Aqui generalizamos: para qualquer ped proximo,
-//  verificamos se tem um damager valido e nao-policia.
+//  OBTER DAMAGER - METODO PRINCIPAL (Police Assistance)
+//  CPed +0x764 = Pointer to the ped that damaged you
+//  Documentado GTAMods Wiki, valido para qualquer CPed
 // ─────────────────────────────────────────────
 
 static DWORD GetPedDamager(DWORD ped)
@@ -252,67 +276,60 @@ static DWORD GetPedDamager(DWORD ped)
 
     DWORD damager = ReadMem<DWORD>(ped + PED_DAMAGER_OFFSET);
     if (!damager) return 0;
-    if (IsBadReadPtr((void*)damager, 0x600)) return 0;
-
-    // Verificar que e um ped (entity type == 4)
-    if (IsBadReadPtr((void*)(damager + ENTITY_TYPE_OFFSET), 1)) return 0;
-    BYTE nType = ReadMem<BYTE>(damager + ENTITY_TYPE_OFFSET);
-    if (nType != ENTITY_TYPE_PED) return 0;
-
-    // Verificar que esta vivo
     if (!IsPedValid(damager)) return 0;
+    if (!IsEntityAPed(damager)) return 0;
 
     return damager;
 }
 
 // ─────────────────────────────────────────────
+//  OBTER ALVO ACTIVO - CORRIGIDO v8
+//  CPed +0x79C = Targetted CPed (documentado GTAMods Wiki)
+// ─────────────────────────────────────────────
+
+static DWORD GetPedTarget(DWORD ped)
+{
+    if (!ped) return 0;
+    if (IsBadReadPtr((void*)(ped + PED_TARGET_OFFSET), 4)) return 0;
+
+    DWORD target = ReadMem<DWORD>(ped + PED_TARGET_OFFSET);
+    if (!target) return 0;
+    if (!IsPedValid(target)) return 0;
+    if (!IsEntityAPed(target)) return 0;
+
+    return target;
+}
+
+// ─────────────────────────────────────────────
 //  ORDENAR COP A ATACAR
-//  Usa CTaskComplexKillPedOnFoot via ctor + SetTask
-//  (equivalente ao opcode 05E2 do CLEO)
 // ─────────────────────────────────────────────
 
 typedef void* (__thiscall* tKillTaskCtor)(void*, DWORD*, int, int, bool, bool, float);
 typedef void  (__thiscall* tSetTask)(void*, void*, int);
-typedef void  (__thiscall* tClearTasks)(void*, bool);
 
-static tKillTaskCtor KillTaskCtor = (tKillTaskCtor)ADDR_KILL_TASK_CTOR;
-static tSetTask      SetTask      = (tSetTask)ADDR_SET_TASK;
-static tClearTasks   ClearTasks   = (tClearTasks)ADDR_CLEAR_TASKS;
+static tKillTaskCtor KillTaskCtor = (tKillTaskCtor)0x624670;
+static tSetTask      SetTask      = (tSetTask)0x681AD0;
 
 static bool OrderCopAttack(DWORD cop, DWORD target)
 {
     if (!IsPedValid(cop) || !IsPedValid(target)) return false;
     if (cop == target) return false;
-    if (IsInVehicle(cop))
-    {
-        Log("Cop em viatura, ignorar");
-        return false;
-    }
-    if (CopIsOnCooldown(cop))
-    {
-        return false;
-    }
+    if (IsInVehicle(cop)) return false;
+    if (CopIsOnCooldown(cop)) return false;
 
-    DWORD taskMgr = cop + 0x4A8;  // PED_TASK_MGR_OFFSET
+    DWORD taskMgr = cop + TASK_MGR_OFFSET;
     if (IsBadReadPtr((void*)taskMgr, 20)) return false;
 
     // Nao interromper se ja esta a atacar
-    DWORD curTask = ReadMem<DWORD>(taskMgr + 2 * 4);
+    DWORD curTask = ReadMem<DWORD>(taskMgr + TASK_SLOT_PRIMARY * 4);
     if (curTask && !IsBadReadPtr((void*)curTask, 8))
-    {
-        int curType = ReadMem<int>(curTask + 0x4);
-        if (curType == 167 || curType == 134 || curType == 162)
-        {
-            Log("Cop ja em combate, manter task");
-            return false;
-        }
-    }
+        if (ReadMem<int>(curTask + 0x4) == TASK_COMPLEX_KILL_PED) return false;
 
     void* task = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x28);
     if (!task) return false;
 
     KillTaskCtor(task, (DWORD*)target, -1, 0, true, true, 100.f);
-    SetTask((void*)taskMgr, task, 2);
+    SetTask((void*)taskMgr, task, TASK_SLOT_PRIMARY);
     SetCopCooldown(cop);
 
     Vec3 cp = GetPedPos(cop);
@@ -325,12 +342,6 @@ static bool OrderCopAttack(DWORD cop, DWORD target)
 
 // ─────────────────────────────────────────────
 //  LOGICA PRINCIPAL
-//
-//  Para cada ped proximo do jogador (nao-policia):
-//    A) Verificar PED_DAMAGER_OFFSET -> ha agressor confirmado?
-//    B) Backup: ped esta a perder HP? (alguem esta a atacar)
-//
-//  Se detectado -> encontrar policia proximo -> ordenar ataque.
 // ─────────────────────────────────────────────
 
 static void ProcessLocalViolence()
@@ -339,10 +350,13 @@ static void ProcessLocalViolence()
     if (!player || IsBadReadPtr((void*)player, 0x600)) return;
 
     Vec3 pp = GetPedPos(player);
+
+    // Verificar que a posicao do jogador e valida
+    if (pp.x == 0.f && pp.y == 0.f) return;
+
     int poolSize = GetPedPoolSize();
     if (poolSize <= 0 || poolSize > 140) return;
 
-    // Listas de peds a processar
     static DWORD aggressors[32];
     static DWORD cops[16];
     int aggCount = 0, copCount = 0;
@@ -356,7 +370,7 @@ static void ProcessLocalViolence()
 
         float dist = Dist2DToXY(ped, pp.x, pp.y);
 
-        // Recolher policias proximos
+        // Recolher policias
         if (IsCopPed(ped))
         {
             if (dist <= POLICE_ENGAGE_RADIUS)
@@ -364,68 +378,72 @@ static void ProcessLocalViolence()
             continue;
         }
 
-        // Verificar ped nao-policia dentro do raio
         if (dist > DETECTION_RADIUS) continue;
 
-        // -----------------------------------------
-        // METODO A: PED_DAMAGER_OFFSET (Police Assistance)
-        // Quem atacou este ped recentemente?
-        // -----------------------------------------
+        // ─────────────────────────────────────────────
+        // METODO A: damager de outro ped
+        // Este ped foi atacado recentemente?
+        // Se sim, quem o atacou e o agressor confirmado.
+        // ─────────────────────────────────────────────
         DWORD damager = GetPedDamager(ped);
-
         if (damager && damager != player && !IsCopPed(damager))
         {
-            // Confirmar que o damager esta proximo
-            float damagerDist = Dist2DToXY(damager, pp.x, pp.y);
-            if (damagerDist <= DETECTION_RADIUS)
+            float dmgDist = Dist2DToXY(damager, pp.x, pp.y);
+            if (dmgDist <= DETECTION_RADIUS)
             {
-                // Registar o AGRESSOR (quem causou o dano), nao a vitima
                 bool found = false;
                 for (int k = 0; k < aggCount; k++)
                     if (aggressors[k] == damager) { found = true; break; }
                 if (!found)
                 {
                     aggressors[aggCount++] = damager;
-                    Log("Agressor via damager (dist vitima: " +
-                        std::to_string((int)dist) + "m)");
+                    Vec3 dp = GetPedPos(damager);
+                    Log("Agressor via damager: [" +
+                        std::to_string((int)dp.x) + "," +
+                        std::to_string((int)dp.y) + "] dist=" +
+                        std::to_string((int)dmgDist) + "m");
                 }
             }
         }
 
-        // -----------------------------------------
-        // METODO B: Saude a diminuir (backup)
-        // Se este ped esta a perder HP, alguem o atacou.
-        // Registar o proprio ped como participante de combate.
-        // -----------------------------------------
+        // ─────────────────────────────────────────────
+        // METODO B: alvo activo (0x79C)
+        // Este ped esta a visar activamente outro ped nao-policia?
+        // ─────────────────────────────────────────────
+        DWORD target = GetPedTarget(ped);
+        if (target && target != player && !IsCopPed(target))
+        {
+            bool found = false;
+            for (int k = 0; k < aggCount; k++)
+                if (aggressors[k] == ped) { found = true; break; }
+            if (!found)
+            {
+                aggressors[aggCount++] = ped;
+                Vec3 ap = GetPedPos(ped);
+                Log("Agressor via target activo: [" +
+                    std::to_string((int)ap.x) + "," +
+                    std::to_string((int)ap.y) + "] dist=" +
+                    std::to_string((int)dist) + "m");
+            }
+        }
+
+        // ─────────────────────────────────────────────
+        // METODO C: saude a diminuir (backup)
+        // ─────────────────────────────────────────────
         bool losingHP = IsPedLosingHealth(ped, i);
         if (losingHP)
         {
-            // Tentar usar o damager se existir
+            // Tentar obter o damager primeiro
             DWORD dmg2 = GetPedDamager(ped);
-            if (dmg2 && dmg2 != player && !IsCopPed(dmg2))
+            DWORD toAdd = (dmg2 && dmg2 != player && !IsCopPed(dmg2)) ? dmg2 : ped;
+
+            bool found = false;
+            for (int k = 0; k < aggCount; k++)
+                if (aggressors[k] == toAdd) { found = true; break; }
+            if (!found && aggCount < 32)
             {
-                bool found = false;
-                for (int k = 0; k < aggCount; k++)
-                    if (aggressors[k] == dmg2) { found = true; break; }
-                if (!found && aggCount < 32)
-                {
-                    aggressors[aggCount++] = dmg2;
-                    Log("Agressor via saude+damager");
-                }
-            }
-            else
-            {
-                // Sem damager identificado - registar a vitima
-                // (policia vai para o local do combate de qualquer forma)
-                bool found = false;
-                for (int k = 0; k < aggCount; k++)
-                    if (aggressors[k] == ped) { found = true; break; }
-                if (!found && aggCount < 32)
-                {
-                    aggressors[aggCount++] = ped;
-                    Log("Participante de combate via saude (dist: " +
-                        std::to_string((int)dist) + "m)");
-                }
+                aggressors[aggCount++] = toAdd;
+                Log("Participante via perda de saude");
             }
         }
     }
@@ -437,12 +455,10 @@ static void ProcessLocalViolence()
     Log("Violencia detectada: " + std::to_string(aggCount) +
         " agressor(es), " + std::to_string(copCount) + " policia(s)");
 
-    // Destacar cada cop para o agressor mais proximo
     int tasked = 0;
     for (int c = 0; c < copCount; c++)
     {
         DWORD cop = cops[c];
-
         DWORD closest = 0;
         float minDist = 9999.f;
         for (int a = 0; a < aggCount; a++)
@@ -450,10 +466,9 @@ static void ProcessLocalViolence()
             float d = Dist2D(cop, aggressors[a]);
             if (d < minDist) { minDist = d; closest = aggressors[a]; }
         }
-
         if (closest)
         {
-            Log("Destacar cop (dist agressor: " + std::to_string((int)minDist) + "m)");
+            Log("Destacar cop (dist: " + std::to_string((int)minDist) + "m)");
             if (OrderCopAttack(cop, closest))
                 tasked++;
         }
@@ -473,7 +488,7 @@ static bool   g_bRunning = false;
 static DWORD WINAPI PluginThread(LPVOID)
 {
     Sleep(5000);
-    Log("=== LocalReactivePolice v7 iniciado ===");
+    Log("=== LocalReactivePolice v8 iniciado ===");
     while (g_bRunning)
     {
         ProcessLocalViolence();
